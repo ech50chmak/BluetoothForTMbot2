@@ -1,0 +1,10 @@
+node_modules/
+.npm/
+.cache/
+dist/
+tmp/
+*.log
+package-lock.json
+web/.DS_Store
+__pycache__/
+*.pyc

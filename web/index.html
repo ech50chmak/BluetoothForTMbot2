@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>TMbot Web BLE Uploader</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 2rem;
+        background: #f7f7f7;
+      }
+      textarea {
+        width: 100%;
+        min-height: 200px;
+        font-family: monospace;
+        padding: 1rem;
+        box-sizing: border-box;
+      }
+      button {
+        padding: 0.6rem 1.2rem;
+        margin-top: 0.5rem;
+        cursor: pointer;
+      }
+      #status {
+        margin-top: 1rem;
+        padding: 0.5rem;
+        background: #fff;
+        border: 1px solid #ccc;
+        min-height: 4rem;
+        font-family: monospace;
+        overflow: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>TMbot Web Bluetooth uploader</h1>
+    <p>
+      Вставьте JSON со списком плиток вида <code>[[[x0,y0],...],[...]]</code> и
+      нажмите «Отправить».
+    </p>
+    <textarea id="grid-input" placeholder="[[[0,0],[1,0]],[[2,1]]]" spellcheck="false"></textarea>
+    <div>
+      <button id="btn-send">Отправить в TMbot</button>
+    </div>
+    <div id="status">Статус BLE появится здесь…</div>
+    <script type="module">
+      import { sendTileGrid } from './grid-client.js';
+
+      const textarea = document.getElementById('grid-input');
+      const button = document.getElementById('btn-send');
+      const statusBox = document.getElementById('status');
+
+      function printStatus(payload) {
+        statusBox.textContent = JSON.stringify(payload, null, 2);
+      }
+
+      button.addEventListener('click', async () => {
+        let grid;
+        try {
+          grid = JSON.parse(textarea.value);
+        } catch (err) {
+          alert('Некорректный JSON: ' + err.message);
+          return;
+        }
+
+        try {
+          const bytes = await sendTileGrid(grid, {
+            onStatus: printStatus,
+            awaitStable: 500
+          });
+          printStatus({
+            message: `Отправлено ${bytes} байт,
+                     ожидайте подтверждения со стороны робота`
+          });
+        } catch (err) {
+          printStatus({ error: err.message });
+        }
+      });
+    </script>
+  </body>
+</html>
