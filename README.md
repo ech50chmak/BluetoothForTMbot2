@@ -6,7 +6,7 @@ Node.js BLE gateway for Raspberry Pi 4 inspired by `balena-web-ble`. The gateway
 
 - `TMGridService` (UUID `12345678-1234-5678-1234-56789abc0000`) publishes:
   - `GridUploadCharacteristic` (`write`, UUID `...0001`) with write-with-response, START/CHUNK/END framing, inactivity timeout, and verbose logging.
-  - `GridStatusCharacteristic` (`read`, `notify`, UUID `...0002`) providing ok/error flags, progress, hashes, command results, and last message.
+  - `GridStatusCharacteristic` (`read`, `notify`, UUID `...0002`) that streams status snapshots using framed 20-byte notifications (START/CONT/END) so browsers with small MTU stay happy.
 - START/CHUNK/END protocol with MAX_CHUNK = 180 bytes and optional inline mode for very small payloads.
 - Atomic file writes to `GRID_PAYLOAD_PATH` via temporary files to prevent partial reads.
 - Optional `GRID_COMMAND` + `GRID_COMMAND_ARGS` execution after a successful upload, with exit-code tracking in status.
@@ -98,6 +98,7 @@ Serve `web/index.html` over HTTPS (or `http://localhost`) in Chrome/Edge/Brave w
 - **Connect** - pairs and subscribes to the status characteristic (log output + live JSON in the UI).
 - **Send (inline)** - writes a single frame using `writeValueWithResponse`. Recommended for payloads <= 100 bytes.
 - **Send (chunked)** - always uses START/CHUNK/END frames (MAX_CHUNK = 180 bytes) with exponential retry on transient errors.
+- Status updates arrive as START/CONT/END frames and are reassembled in the browser before parsing, following the same pattern as Nordic UART / Web Bluetooth console samples.
 
 The underlying helper is exposed via `setupClient` in `web/grid-client.js`. In DevTools you can call:
 
@@ -112,7 +113,7 @@ await tmBle.sendChunked(bigGrid);
 ## CLI / automated checks
 
 - `npm run smoke` executes `scripts/smoke-test.js` (state validation without BLE).
-- `python3 scripts/send_grid_bleak.py --name TMbot --path sample.json  # requires `pip install bleak`` pushes a payload via bleak using START/CHUNK/END frames with write-with-response.
+- `python3 scripts/send_grid_bleak.py --name TMbot --path sample.json` (requires `pip install bleak`) pushes a payload via bleak using START/CHUNK/END frames with write-with-response.
 - `python3 scripts/grid_consumer.py --path /var/tmp/tmbot-grid.json` tails the saved grid file.
 - `scripts/adv-check.md` documents btmon/btctl commands and typical BLE pitfalls.
 
@@ -125,6 +126,12 @@ await tmBle.sendChunked(bigGrid);
 | Browser disconnects after 15 seconds | Idle timeout is triggered. Send the next CHUNK within 20 seconds or re-start with a new START frame. |
 | No file written to `GRID_PAYLOAD_PATH` | Inspect status notifications (`lastError`, `lastMessage`). Confirm the service has write permissions to the target path. |
 | Command exits with non-zero code | Review `lastCommand.code` in status and the process output in server logs. |
+
+## References
+
+- Google Web Bluetooth samples (UART console, write-with-response patterns).
+- @abandonware/bleno discussion threads on MTU-sized notifications and chunking strategies.
+- Nordic nRF UART service approach for framing data over BLE characteristics.
 
 ## Shutdown
 

@@ -2,15 +2,31 @@ const SERVICE_UUID = '12345678-1234-5678-1234-56789abc0000';
 const UPLOAD_CHAR_UUID = '12345678-1234-5678-1234-56789abc0001';
 const STATUS_CHAR_UUID = '12345678-1234-5678-1234-56789abc0002';
 
-const OPCODES = {
+const UPLOAD_OPCODES = {
   START: 0x01,
   CHUNK: 0x02,
   CANCEL: 0x03,
   END: 0x04
 };
 
-const MAX_CHUNK = 180;
+const STATUS_OPCODES = {
+  START: 0x01,
+  CONT: 0x02,
+  END: 0x03
+};
+
+const UPLOAD_MAX_CHUNK = 180;
 const RETRY_DELAYS_MS = [150, 300, 600, 1200];
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+function appendUint8Arrays(a, b) {
+  const result = new Uint8Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
+}
 
 class TMbotBleClient {
   constructor(logFn) {
@@ -21,6 +37,19 @@ class TMbotBleClient {
     this.uploadCharacteristic = null;
     this.statusCharacteristic = null;
     this.statusListener = null;
+    this.statusAssembler = this.createAssembler();
+  }
+
+  createAssembler() {
+    return {
+      expected: null,
+      buffer: new Uint8Array(0),
+      complete: false
+    };
+  }
+
+  resetAssembler() {
+    this.statusAssembler = this.createAssembler();
   }
 
   async ensureConnected(options = {}) {
@@ -38,6 +67,7 @@ class TMbotBleClient {
     });
     this.device.addEventListener('gattserverdisconnected', () => {
       this.log('Device disconnected');
+      this.resetAssembler();
     });
 
     this.server = await this.device.gatt.connect();
@@ -50,38 +80,101 @@ class TMbotBleClient {
   }
 
   async subscribeStatus() {
-    if (!this.statusCharacteristic) {
-      return;
-    }
-    if (this.statusListener) {
+    if (!this.statusCharacteristic || this.statusListener) {
       return;
     }
     await this.statusCharacteristic.startNotifications();
     this.statusListener = event => {
-      try {
-        const payload = JSON.parse(new TextDecoder().decode(event.target.value));
-        this.log(`STATUS ${JSON.stringify(payload)}`);
-        if (typeof window !== 'undefined' && window.tmBleUpdateStatus) {
-          window.tmBleUpdateStatus(payload);
-        }
-      } catch (err) {
-        this.log(`STATUS decode error: ${err.message}`);
-      }
+      this.handleStatusNotification(event).catch(err =>
+        this.log(`STATUS decode error: ${err.message}`)
+      );
     };
     this.statusCharacteristic.addEventListener(
       'characteristicvaluechanged',
       this.statusListener
     );
-    // prime with current value
     try {
-      const snapshot = await this.statusCharacteristic.readValue();
-      const payload = JSON.parse(new TextDecoder().decode(snapshot));
-      this.log(`STATUS ${JSON.stringify(payload)}`);
-      if (typeof window !== 'undefined' && window.tmBleUpdateStatus) {
-        window.tmBleUpdateStatus(payload);
-      }
+      const value = await this.statusCharacteristic.readValue();
+      const json = textDecoder.decode(value);
+      this.processStatus(json);
     } catch (err) {
       this.log(`STATUS read error: ${err.message}`);
+    }
+  }
+
+  async handleStatusNotification(event) {
+    const view = event.target.value;
+    const frame = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+    if (frame.length === 0) {
+      throw new Error('Empty notification');
+    }
+    const opcode = frame[0];
+    if (opcode === STATUS_OPCODES.START) {
+      if (frame.length < 5) {
+        throw new Error('START frame too short');
+      }
+      const expected = new DataView(frame.buffer, frame.byteOffset + 1, 4).getUint32(0, true);
+      const chunk = frame.slice(5);
+      if (chunk.length > expected) {
+        throw new Error('START chunk longer than expected');
+      }
+      this.statusAssembler = {
+        expected,
+        buffer: chunk,
+        complete: chunk.length === expected
+      };
+      return;
+    }
+
+    if (opcode === STATUS_OPCODES.CONT) {
+      if (this.statusAssembler.expected == null) {
+        throw new Error('CONT frame without START');
+      }
+      const chunk = frame.slice(1);
+      const combined = appendUint8Arrays(this.statusAssembler.buffer, chunk);
+      if (combined.length > this.statusAssembler.expected) {
+        throw new Error('Status payload exceeds declared length');
+      }
+      this.statusAssembler.buffer = combined;
+      this.statusAssembler.complete =
+        combined.length === this.statusAssembler.expected;
+      return;
+    }
+
+    if (opcode === STATUS_OPCODES.END) {
+      if (this.statusAssembler.expected == null) {
+        this.log('STATUS warning: END without START');
+        this.resetAssembler();
+        return;
+      }
+      if (!this.statusAssembler.complete) {
+        this.log(
+          `STATUS warning: END before receiving full payload (${this.statusAssembler.buffer.length}/${this.statusAssembler.expected})`
+        );
+        this.resetAssembler();
+        return;
+      }
+      this.flushStatusBuffer();
+      return;
+    }
+
+    throw new Error(`Unknown status opcode ${opcode}`);
+  }
+
+  flushStatusBuffer() {
+    try {
+      const json = textDecoder.decode(this.statusAssembler.buffer);
+      this.processStatus(json);
+    } finally {
+      this.resetAssembler();
+    }
+  }
+
+  processStatus(jsonString) {
+    const payload = JSON.parse(jsonString);
+    this.log(`STATUS ${JSON.stringify(payload)}`);
+    if (typeof window !== 'undefined' && window.tmBleUpdateStatus) {
+      window.tmBleUpdateStatus(payload);
     }
   }
 
@@ -93,6 +186,7 @@ class TMbotBleClient {
       );
     }
     this.statusListener = null;
+    this.resetAssembler();
     if (this.server && this.server.connected) {
       this.server.disconnect();
     }
@@ -113,40 +207,31 @@ class TMbotBleClient {
   async sendChunked(grid) {
     await this.ensureConnected();
     const payload = this.encodeGrid(grid);
-    if (payload.length <= MAX_CHUNK) {
-      this.log(
-        `Payload fits in a single chunk (${payload.length} bytes). Sending inline instead.`
-      );
-      await this.writeFrame(payload);
-      return;
-    }
+    const total = payload.length;
 
     const startFrame = new Uint8Array(5);
     const view = new DataView(startFrame.buffer);
-    startFrame[0] = OPCODES.START;
-    view.setUint32(1, payload.length, true);
+    startFrame[0] = UPLOAD_OPCODES.START;
+    view.setUint32(1, total, true);
     await this.writeFrame(startFrame);
-    this.log(`START sent (${payload.length} bytes total)`);
+    this.log(`START sent (${total} bytes total)`);
 
-    for (let offset = 0; offset < payload.length; offset += MAX_CHUNK) {
-      const chunk = payload.subarray(offset, offset + MAX_CHUNK);
-      const frame = new Uint8Array(chunk.length + 1);
-      frame[0] = OPCODES.CHUNK;
-      frame.set(chunk, 1);
+    for (let offset = 0; offset < total; offset += UPLOAD_MAX_CHUNK) {
+      const chunkLength = Math.min(UPLOAD_MAX_CHUNK, total - offset);
+      const frame = new Uint8Array(chunkLength + 1);
+      frame[0] = UPLOAD_OPCODES.CHUNK;
+      frame.set(payload.subarray(offset, offset + chunkLength), 1);
       await this.writeFrame(frame);
-      this.log(
-        `CHUNK sent (${Math.min(offset + chunk.length, payload.length)}/${payload.length})`
-      );
+      this.log(`CHUNK sent (${Math.min(offset + chunkLength, total)}/${total})`);
     }
 
-    const endFrame = new Uint8Array([OPCODES.END]);
-    await this.writeFrame(endFrame);
+    await this.writeFrame(new Uint8Array([UPLOAD_OPCODES.END]));
     this.log('END sent');
   }
 
   encodeGrid(grid) {
     const json = typeof grid === 'string' ? grid : JSON.stringify(grid);
-    return new TextEncoder().encode(json);
+    return textEncoder.encode(json);
   }
 
   async writeFrame(frame) {
@@ -226,9 +311,7 @@ export function setupClient(options = {}) {
     sendChunked: grid =>
       client.sendChunked(grid).catch(err => logFn(`Chunked send error: ${err.message}`)),
     sendRawString: str =>
-      client
-        .sendInline(str)
-        .catch(err => logFn(`Raw send error: ${err.message}`)),
+      client.sendInline(str).catch(err => logFn(`Raw send error: ${err.message}`)),
     disconnect: () => client.disconnect()
   };
 

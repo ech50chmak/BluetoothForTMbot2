@@ -10,6 +10,7 @@
         background: #f7f7f7;
         color: #222;
       }
+
       textarea {
         width: 100%;
         min-height: 180px;
@@ -17,11 +18,13 @@
         padding: 1rem;
         box-sizing: border-box;
       }
+
       button {
         padding: 0.6rem 1.2rem;
         margin: 0.3rem 0.3rem 0.3rem 0;
         cursor: pointer;
       }
+
       #status,
       #log {
         margin-top: 1rem;
@@ -33,6 +36,7 @@
         overflow: auto;
         white-space: pre;
       }
+
       #log {
         max-height: 240px;
       }
@@ -42,7 +46,7 @@
     <h1>TMbot Web Bluetooth uploader</h1>
     <p>
       Paste the grid JSON in the format <code>[[[x0,y0],...],[...]]</code> and use one of the send
-      buttons. Inline mode writes a single frame (&lt;= 100 bytes), chunked mode always uses the
+      buttons. Inline mode writes a single frame (<= 100 bytes); chunked mode always streams with the
       START/CHUNK/END protocol.
     </p>
     <textarea
@@ -54,6 +58,7 @@
       <button id="btn-connect">Connect</button>
       <button id="btn-send-inline">Send (inline)</button>
       <button id="btn-send-chunk">Send (chunked)</button>
+      <button id="btn-disconnect">Disconnect</button>
     </div>
     <div id="status">BLE status will appear here.</div>
     <div id="log">Logs will appear here.</div>
@@ -67,19 +72,24 @@
       const client = setupClient({ statusBox, logBox });
 
       function parseGridInput() {
-        try {
-          return JSON.parse(textarea.value);
-        } catch (err) {
-          alert('Invalid JSON: ' + err.message);
-          throw err;
+        const raw = textarea.value.trim();
+        if (!raw) {
+          throw new Error('Input is empty');
         }
+        return JSON.parse(raw);
+      }
+
+      function logError(prefix, error) {
+        const line = `[${new Date().toISOString()}] ${prefix}: ${error.message || error}`;
+        logBox.textContent += `${line}\n`;
+        logBox.scrollTop = logBox.scrollHeight;
       }
 
       document.getElementById('btn-connect').addEventListener('click', async () => {
         try {
           await client.ensureConnected();
         } catch (err) {
-          logBox.textContent += `[${new Date().toISOString()}] Connect error: ${err.message}\n`;
+          logError('Connect error', err);
         }
       });
 
@@ -88,7 +98,7 @@
           const grid = parseGridInput();
           await client.sendInline(grid);
         } catch (err) {
-          logBox.textContent += `[${new Date().toISOString()}] Inline send error: ${err.message}\n`;
+          logError('Inline send error', err);
         }
       });
 
@@ -97,10 +107,18 @@
           const grid = parseGridInput();
           await client.sendChunked(grid);
         } catch (err) {
-          logBox.textContent += `[${new Date().toISOString()}] Chunked send error: ${err.message}\n`;
+          logError('Chunked send error', err);
+        }
+      });
+
+      document.getElementById('btn-disconnect').addEventListener('click', async () => {
+        try {
+          await client.disconnect();
+          logBox.textContent += `[${new Date().toISOString()}] Disconnected\n`;
+        } catch (err) {
+          logError('Disconnect error', err);
         }
       });
     </script>
   </body>
 </html>
-
