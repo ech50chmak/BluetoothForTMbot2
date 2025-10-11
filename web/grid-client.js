@@ -1,6 +1,6 @@
-const SERVICE_UUID = '13371337-0000-4000-8000-133713371337';
-const UPLOAD_CHAR_UUID = '13371337-0000-4000-8000-133713371338';
-const STATUS_CHAR_UUID = '13371337-0000-4000-8000-133713371339';
+const SERVICE_UUID = '12345678-1234-5678-1234-56789abc0000';
+const UPLOAD_CHAR_UUID = '12345678-1234-5678-1234-56789abc0001';
+const STATUS_CHAR_UUID = '12345678-1234-5678-1234-56789abc0002';
 
 const OPCODES = {
   START: 0x01,
@@ -26,6 +26,11 @@ async function subscribeStatus(characteristic, onMessage) {
 }
 
 async function writeChunked(characteristic, payload) {
+  if (payload.length <= MAX_CHUNK) {
+    await characteristic.writeValue(payload);
+    return;
+  }
+
   const startFrame = new Uint8Array(5);
   const startView = new DataView(startFrame.buffer);
   startFrame[0] = OPCODES.START;
@@ -43,7 +48,7 @@ async function writeChunked(characteristic, payload) {
 
 export async function sendTileGrid(grid, options = {}) {
   if (!navigator.bluetooth) {
-    throw new Error('Web Bluetooth API не поддерживается браузером');
+    throw new Error('Web Bluetooth API is not available in this browser');
   }
 
   const encoder = new TextEncoder();

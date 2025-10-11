@@ -1,9 +1,4 @@
-const util = require('util');
-const bleno = require('bleno');
-
-const { Characteristic, Descriptor } = bleno;
-
-const SERVICE_LABEL = 'TMbot tile grid upload';
+const { Characteristic, Descriptor } = require('bleno');
 
 const OPCODES = {
   START: 0x01,
@@ -13,60 +8,22 @@ const OPCODES = {
 
 const MAX_CHUNK = 180;
 
-class GridUploadCharacteristic {
-  constructor({ bridge }) {
-    GridUploadCharacteristic.super_.call(this, {
-      uuid: '13371337-0000-4000-8000-133713371338',
-      properties: ['write', 'notify'],
+class GridUploadCharacteristic extends Characteristic {
+  constructor({ state, uuid }) {
+    super({
+      uuid,
+      properties: ['write', 'writeWithoutResponse'],
       descriptors: [
         new Descriptor({
           uuid: '2901',
-          value: SERVICE_LABEL
+          value: 'Upload grid JSON'
         })
       ]
     });
 
-    this.bridge = bridge;
+    this.state = state;
+    this.buffer = Buffer.alloc(0);
     this.expectedLength = null;
-    this.chunks = [];
-    this.subscriptionReleaser = null;
-  }
-
-  currentBufferLength() {
-    return this.chunks.reduce((sum, buffer) => sum + buffer.length, 0);
-  }
-
-  clearBuffer() {
-    this.expectedLength = null;
-    this.chunks = [];
-  }
-
-  joinBuffer() {
-    return Buffer.concat(this.chunks, this.currentBufferLength());
-  }
-
-  notifyStatus() {
-    if (!this.updateValueCallback) {
-      return;
-    }
-    const payload = Buffer.from(JSON.stringify(this.bridge.getStatus()), 'utf8');
-    this.updateValueCallback(payload);
-  }
-
-  onSubscribe(maxValueSize, updateValueCallback) {
-    this.updateValueCallback = updateValueCallback;
-    this.subscriptionReleaser = this.bridge.addStatusListener(() => {
-      this.notifyStatus();
-    });
-    this.notifyStatus();
-  }
-
-  onUnsubscribe() {
-    if (this.subscriptionReleaser) {
-      this.subscriptionReleaser();
-    }
-    this.subscriptionReleaser = null;
-    this.updateValueCallback = null;
   }
 
   onWriteRequest(data, offset, withoutResponse, callback) {
@@ -74,118 +31,109 @@ class GridUploadCharacteristic {
       callback(this.RESULT_ATTR_NOT_LONG);
       return;
     }
+
     if (!data || data.length === 0) {
+      this.handleError(new Error('Empty payload'));
       callback(this.RESULT_INVALID_ATTRIBUTE_LENGTH);
       return;
     }
 
+    let result;
+    try {
+      result = this.handleFrame(data);
+    } catch (err) {
+      this.handleError(err);
+      this.resetReception();
+      callback(this.RESULT_UNLIKELY_ERROR);
+      return;
+    }
+
+    if (result === 'start' || result === 'chunk' || result === 'cancel') {
+      callback(this.RESULT_SUCCESS);
+      return;
+    }
+
+    const payloadBuffer = Buffer.isBuffer(result) ? result : Buffer.from(data);
+
+    this.state
+      .handlePayload(payloadBuffer)
+      .then(() => {
+        this.resetReception();
+        callback(this.RESULT_SUCCESS);
+      })
+      .catch(err => {
+        this.handleError(err);
+        this.resetReception();
+        callback(this.RESULT_UNLIKELY_ERROR);
+      });
+  }
+
+  handleFrame(data) {
     const opcode = data.readUInt8(0);
 
-    switch (opcode) {
-      case OPCODES.START:
-        this.handleStartFrame(data, callback);
-        break;
-      case OPCODES.CHUNK:
-        this.handleChunk(data, callback);
-        break;
-      case OPCODES.CANCEL:
-        this.handleCancel(callback);
-        break;
-      default:
-        callback(this.RESULT_UNLIKELY_ERROR);
+    if (opcode === OPCODES.START) {
+      if (data.length < 5) {
+        throw new Error('START frame requires 4-byte length');
+      }
+      const expected = data.readUInt32LE(1);
+      if (expected <= 0) {
+        throw new Error('START frame length must be positive');
+      }
+      if (expected > this.state.maxBytes) {
+        throw new Error('Declared payload exceeds allowed size');
+      }
+      this.resetReception();
+      this.expectedLength = expected;
+      this.state.startReception(expected);
+      return 'start';
     }
+
+    if (opcode === OPCODES.CANCEL) {
+      this.state.cancelReception('Client cancelled transfer');
+      this.resetReception();
+      return 'cancel';
+    }
+
+    if (opcode === OPCODES.CHUNK) {
+      if (this.expectedLength === null) {
+        throw new Error('CHUNK received before START');
+      }
+      const chunk = data.subarray(1);
+      if (!chunk.length || chunk.length > MAX_CHUNK) {
+        throw new Error('Invalid chunk length');
+      }
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      if (this.buffer.length > this.expectedLength) {
+        throw new Error('Received more bytes than declared');
+      }
+      this.state.progressReception(this.buffer.length);
+      if (this.buffer.length === this.expectedLength) {
+        return Buffer.from(this.buffer);
+      }
+      return 'chunk';
+    }
+
+    if (this.expectedLength !== null) {
+      throw new Error('Inline payload not allowed during chunked transfer');
+    }
+
+    // Inline JSON payload
+    return Buffer.from(data);
   }
 
-  handleStartFrame(data, callback) {
-    if (data.length < 5) {
-      callback(this.RESULT_INVALID_ATTRIBUTE_LENGTH);
-      return;
-    }
-    const length = data.readUInt32LE(1);
-    this.clearBuffer();
-    this.expectedLength = length;
-    this.bridge.bumpStatus({
-      receiving: true,
-      expectedBytes: length,
-      receivedBytes: 0,
-      lastError: null
-    });
-    this.notifyStatus();
-    callback(this.RESULT_SUCCESS);
+  resetReception() {
+    this.buffer = Buffer.alloc(0);
+    this.expectedLength = null;
   }
 
-  handleChunk(data, callback) {
-    if (this.expectedLength === null) {
-      callback(this.RESULT_UNLIKELY_ERROR);
-      return;
-    }
-    const payload = data.subarray(1);
-    if (!payload.length || payload.length > MAX_CHUNK) {
-      callback(this.RESULT_INVALID_ATTRIBUTE_LENGTH);
-      return;
-    }
-    this.chunks.push(payload);
-    const currentLength = this.currentBufferLength();
-    if (currentLength > this.expectedLength) {
-      this.bridge.bumpStatus({
-        receiving: false,
-        lastError: 'Получено больше байт, чем ожидалось'
-      });
-      this.clearBuffer();
-      this.notifyStatus();
-      callback(this.RESULT_UNLIKELY_ERROR);
-      return;
-    }
-
-    if (currentLength === this.expectedLength) {
-      this.finishTransfer(callback);
-      return;
-    }
-
-    this.bridge.bumpStatus({
-      receiving: true,
-      receivedBytes: currentLength
-    });
-    this.notifyStatus();
-    callback(this.RESULT_SUCCESS);
-  }
-
-  handleCancel(callback) {
-    this.bridge.bumpStatus({
-      receiving: false,
-      lastError: 'Передача отменена клиентом'
-    });
-    this.clearBuffer();
-    this.notifyStatus();
-    callback(this.RESULT_SUCCESS);
-  }
-
-  finishTransfer(callback) {
-    const buffer = this.joinBuffer();
-    try {
-      const jsonString = buffer.toString('utf8');
-      const payload = JSON.parse(jsonString);
-      this.bridge.submitGrid(payload);
-      this.bridge.bumpStatus({
-        receiving: false,
-        receivedBytes: buffer.length,
-        expectedBytes: buffer.length
-      });
-      this.notifyStatus();
-      this.clearBuffer();
-      callback(this.RESULT_SUCCESS);
-    } catch (err) {
-      this.bridge.bumpStatus({
-        receiving: false,
-        lastError: `Ошибка JSON: ${err.message}`
-      });
-      this.clearBuffer();
-      this.notifyStatus();
-      callback(this.RESULT_UNLIKELY_ERROR);
+  handleError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (this.expectedLength !== null) {
+      this.state.cancelReception(message);
+    } else {
+      this.state.markError(message);
     }
   }
 }
-
-util.inherits(GridUploadCharacteristic, Characteristic);
 
 module.exports = GridUploadCharacteristic;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Простой потребитель сетки плиток ТМ-бота.
-Читает JSON, созданный BLE-шлюзом, и выводит краткую статистику.
+Simple polling consumer for TM-bot grid payloads.
+Reads the JSON file produced by the BLE gateway and prints basic stats.
 """
 
 import argparse
@@ -11,25 +11,27 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Чтение сеток плиток от BLE-шлюза")
+    parser = argparse.ArgumentParser(
+        description="Monitor grid updates saved by the BLE gateway"
+    )
     parser.add_argument(
         "--path",
         default="/var/tmp/tmbot-grid.json",
-        help="Путь до JSON, который обновляет шлюз",
+        help="Path to the JSON file written by the gateway",
     )
     parser.add_argument(
         "--interval",
         type=float,
         default=1.0,
-        help="Период опроса файла (секунды)",
+        help="Polling interval in seconds",
     )
     return parser.parse_args()
 
 
-def format_grid_stats(grid) -> str:
+def format_stats(grid) -> str:
     tile_sets = len(grid)
     tiles = sum(len(tile_set) for tile_set in grid)
-    return f"{tile_sets} набор(ов) плиток, всего точек {tiles}"
+    return f"{tile_sets} tile set(s), {tiles} points total"
 
 
 def main() -> None:
@@ -42,22 +44,20 @@ def main() -> None:
             try:
                 data = json.loads(grid_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as err:
-                print(f"[WARN] Повреждённый JSON: {err}")
+                print(f"[WARN] Invalid JSON: {err}")
                 time.sleep(args.interval)
                 continue
 
             grid = data.get("grid", [])
-            payload_hash = data.get("hash")
-            if payload_hash is None:
-                payload_hash = hash(json.dumps(grid, sort_keys=True))
+            payload_hash = data.get("hash") or hash(json.dumps(grid, sort_keys=True))
 
             if payload_hash != last_hash:
                 last_hash = payload_hash
-                print(
-                    f"[INFO] {data.get('receivedAt', 'unknown')} -> {format_grid_stats(grid)}"
-                )
+                received_at = data.get("receivedAt", "unknown")
+                bytes_count = data.get("bytes", "n/a")
+                print(f"[INFO] {received_at} -> {format_stats(grid)} ({bytes_count} bytes)")
         else:
-            print(f"[INFO] Ожидание файла {grid_path}")
+            print(f"[INFO] Waiting for {grid_path}")
 
         time.sleep(args.interval)
 

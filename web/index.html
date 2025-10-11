@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>TMbot Web BLE Uploader</title>
@@ -29,20 +29,25 @@
         min-height: 4rem;
         font-family: monospace;
         overflow: auto;
+        white-space: pre;
       }
     </style>
   </head>
   <body>
     <h1>TMbot Web Bluetooth uploader</h1>
     <p>
-      Вставьте JSON со списком плиток вида <code>[[[x0,y0],...],[...]]</code> и
-      нажмите «Отправить».
+      Paste the grid JSON in the format <code>[[[x0,y0],...],[...]]</code> and press "Send".
+      The page uses the START/CHUNK protocol automatically and shows status updates.
     </p>
-    <textarea id="grid-input" placeholder="[[[0,0],[1,0]],[[2,1]]]" spellcheck="false"></textarea>
+    <textarea
+      id="grid-input"
+      placeholder="[[[0,0],[1,0]],[[2,1],[2,2]]]"
+      spellcheck="false"
+    ></textarea>
     <div>
-      <button id="btn-send">Отправить в TMbot</button>
+      <button id="btn-send">Send to TMbot</button>
     </div>
-    <div id="status">Статус BLE появится здесь…</div>
+    <div id="status">BLE status will appear after connecting...</div>
     <script type="module">
       import { sendTileGrid } from './grid-client.js';
 
@@ -59,7 +64,7 @@
         try {
           grid = JSON.parse(textarea.value);
         } catch (err) {
-          alert('Некорректный JSON: ' + err.message);
+          alert('Invalid JSON: ' + err.message);
           return;
         }
 
@@ -69,8 +74,7 @@
             awaitStable: 500
           });
           printStatus({
-            message: `Отправлено ${bytes} байт,
-                     ожидайте подтверждения со стороны робота`
+            message: `Sent ${bytes} bytes, waiting for robot acknowledgement`
           });
         } catch (err) {
           printStatus({ error: err.message });

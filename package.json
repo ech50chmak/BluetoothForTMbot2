@@ -1,12 +1,13 @@
 {
   "name": "tm-grid-gateway",
   "version": "0.1.0",
-  "description": "BLE шлюз для передачи сеток плиток на Raspberry Pi 4 под Web Bluetooth",
+  "description": "BLE шлюз для приёма сеток плиток TM-бота через Web Bluetooth",
   "main": "src/index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node src/index.js",
-    "lint": "npx eslint ."
+    "lint": "eslint .",
+    "test": "node ./scripts/smoke-test.js"
   },
   "keywords": [
     "bluetooth",
@@ -18,8 +19,10 @@
   "author": "",
   "license": "Apache-2.0",
   "dependencies": {
-    "bleno": "^0.5.0",
-    "eventemitter3": "^5.0.1"
+    "bleno": "npm:@abandonware/bleno@^0.6.2"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0"
   },
   "engines": {
     "node": ">=18"
