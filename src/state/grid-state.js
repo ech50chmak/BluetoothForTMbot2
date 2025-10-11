@@ -28,6 +28,9 @@ class GridState extends EventEmitter {
       receiving: false,
       expectedBytes: null,
       receivedBytes: 0,
+      lastFrameType: null,
+      lastChunkLen: 0,
+      lastSeq: 0,
       maxBytes: this.maxBytes,
       lastCommand: null,
       fileSize: 0,
@@ -80,15 +83,28 @@ class GridState extends EventEmitter {
       expectedBytes,
       receivedBytes: 0,
       lastError: null,
-      ok: true
+      ok: true,
+      lastFrameType: 'START',
+      lastChunkLen: 0,
+      lastSeq: 0
     }, `transfer started (expecting ${expectedBytes} bytes)`);
   }
 
-  progressReception(receivedBytes) {
+  progressReception(receivedBytes, meta = {}) {
+    const chunkLength =
+      typeof meta.chunkLength === 'number' && meta.chunkLength >= 0
+        ? meta.chunkLength
+        : Math.max(0, receivedBytes - (this.status.receivedBytes || 0));
+    const seq =
+      typeof meta.seq === 'number' && meta.seq >= 0 ? meta.seq : this.status.lastSeq;
+    const frameType = meta.frame || 'CHUNK';
     this.update({
       receiving: true,
-      receivedBytes
-    }, `chunk received (${receivedBytes}/${this.status.expectedBytes || '?'})`);
+      receivedBytes,
+      lastChunkLen: chunkLength,
+      lastSeq: seq,
+      lastFrameType: frameType
+    }, `chunk received (seq=${seq}, bytes=${receivedBytes}/${this.status.expectedBytes || '?'}, chunk=${chunkLength})`);
   }
 
   cancelReception(message) {
@@ -97,14 +113,17 @@ class GridState extends EventEmitter {
       expectedBytes: null,
       receivedBytes: 0,
       ok: false,
-      lastError: message || 'Transfer cancelled'
+      lastError: message || 'Transfer cancelled',
+      lastFrameType: 'CANCEL',
+      lastChunkLen: 0
     }, message || 'transfer cancelled');
   }
 
   markError(message) {
     this.update({
       ok: false,
-      lastError: message
+      lastError: message,
+      lastFrameType: 'ERROR'
     }, message);
   }
 
@@ -161,6 +180,9 @@ class GridState extends EventEmitter {
       receiving: false,
       expectedBytes: null,
       receivedBytes: buffer.length,
+      lastFrameType: 'END',
+      lastChunkLen: 0,
+      lastSeq: this.status.lastSeq,
       fileSize: stats ? stats.size : buffer.length,
         lastSnapshot: {
           receivedAt: savedAt,

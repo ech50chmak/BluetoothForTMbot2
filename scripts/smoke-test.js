@@ -89,9 +89,19 @@ class StubState {
     this.events.push({ type: 'start', expectedBytes });
   }
 
-  progressReception(bytes) {
+  progressReception(bytes, meta = {}) {
     this.receivedBytes = bytes;
-    this.events.push({ type: 'progress', bytes });
+    this.events.push({ type: 'progress', bytes, meta });
+  }
+
+  update(patch = {}, message = null) {
+    if (typeof patch.expectedBytes === 'number') {
+      this.expectedBytes = patch.expectedBytes;
+    }
+    if (typeof patch.receivedBytes === 'number') {
+      this.receivedBytes = patch.receivedBytes;
+    }
+    this.events.push({ type: 'update', patch, message });
   }
 
   cancelReception(message) {
@@ -131,7 +141,7 @@ async function writeFrame(characteristic, buffer) {
 
 async function testCharacteristicChunkFlow() {
   process.env.GRID_TRANSFER_TIMEOUT_MS = '1000';
-  process.env.GRID_CHUNK_MAX = '20';
+  process.env.GRID_CHUNK_MAX = '19';
   const GridUploadCharacteristic = loadUploadCharacteristic();
   const state = new StubState();
   const characteristic = new GridUploadCharacteristic({ state, uuid: 'tm-test' });
@@ -156,10 +166,10 @@ async function testCharacteristicChunkFlow() {
   startFrame.writeUInt32LE(payload.length, 1);
   await writeFrame(characteristic, startFrame);
 
-  const chunk1 = Buffer.concat([Buffer.from([OPCODES.CHUNK]), payload.slice(0, 20)]);
+  const chunk1 = Buffer.concat([Buffer.from([OPCODES.CHUNK]), payload.slice(0, 19)]);
   await writeFrame(characteristic, chunk1);
 
-  const chunk2 = Buffer.concat([Buffer.from([OPCODES.CHUNK]), payload.slice(20)]);
+  const chunk2 = Buffer.concat([Buffer.from([OPCODES.CHUNK]), payload.slice(19)]);
   await writeFrame(characteristic, chunk2);
 
   await writeFrame(characteristic, Buffer.from([OPCODES.END]));
@@ -176,7 +186,7 @@ async function testCharacteristicChunkFlow() {
 
 async function testCharacteristicTimeout() {
   process.env.GRID_TRANSFER_TIMEOUT_MS = '50';
-  process.env.GRID_CHUNK_MAX = '20';
+  process.env.GRID_CHUNK_MAX = '19';
   const GridUploadCharacteristic = loadUploadCharacteristic();
   const state = new StubState();
   const characteristic = new GridUploadCharacteristic({ state, uuid: 'tm-timeout' });

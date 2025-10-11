@@ -10,13 +10,17 @@ const {
 
 class GridService extends bleno.PrimaryService {
   constructor({ state }) {
+    const uploadCharacteristic = new GridUploadCharacteristic({ state, uuid: UPLOAD_CHAR_UUID });
+    const statusCharacteristic = new GridStatusCharacteristic({ state, uuid: STATUS_CHAR_UUID });
     super({
       uuid: SERVICE_UUID,
       characteristics: [
-        new GridUploadCharacteristic({ state, uuid: UPLOAD_CHAR_UUID }),
-        new GridStatusCharacteristic({ state, uuid: STATUS_CHAR_UUID })
+        uploadCharacteristic,
+        statusCharacteristic
       ]
     });
+    this.uploadCharacteristic = uploadCharacteristic;
+    this.statusCharacteristic = statusCharacteristic;
   }
 }
 

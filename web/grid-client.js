@@ -15,7 +15,10 @@ const STATUS_OPCODES = {
   END: 0x03
 };
 
-const CHUNK_DATA_SIZE = 20;
+const ATT_MTU = 23;
+const MAX_WRITE_BYTES = ATT_MTU - 3; // ATT header leaves 20 bytes for payload
+const CHUNK_HEADER_BYTES = 1;
+const MAX_CHUNK_PAYLOAD = MAX_WRITE_BYTES - CHUNK_HEADER_BYTES;
 const CHUNK_DELAY_MS = 30;
 const RETRY_DELAYS_MS = [150, 300, 600, 1200];
 
@@ -269,13 +272,28 @@ class TMbotBleClient {
     const view = new DataView(frame.buffer);
     frame[0] = UPLOAD_OPCODES.START;
     view.setUint32(1, totalLength, true);
+    if (frame.byteLength > MAX_WRITE_BYTES) {
+      throw new Error(
+        `START frame exceeds ATT write budget (${frame.byteLength}/${MAX_WRITE_BYTES})`
+      );
+    }
     return frame;
   }
 
   createChunkFrame(payload, offset, length) {
-    const frame = new Uint8Array(length + 1);
+    if (length <= 0 || length > MAX_CHUNK_PAYLOAD) {
+      throw new Error(
+        `Requested chunk length ${length} outside allowed range (1-${MAX_CHUNK_PAYLOAD})`
+      );
+    }
+    const frame = new Uint8Array(length + CHUNK_HEADER_BYTES);
     frame[0] = UPLOAD_OPCODES.CHUNK;
-    frame.set(payload.subarray(offset, offset + length), 1);
+    frame.set(payload.subarray(offset, offset + length), CHUNK_HEADER_BYTES);
+    if (frame.byteLength > MAX_WRITE_BYTES) {
+      throw new Error(
+        `Chunk frame exceeds ATT write budget (${frame.byteLength}/${MAX_WRITE_BYTES})`
+      );
+    }
     return frame;
   }
 
@@ -361,10 +379,17 @@ class TMbotBleClient {
           }
         }
         if (skip) {
+          if (context.startsWith('chunk') && typeof meta.seq === 'number') {
+            state.seq = Math.max(state.seq, meta.seq + 1);
+          }
           return { skip: true };
         }
+        const extra =
+          context.startsWith('chunk') && typeof meta.seq === 'number'
+            ? ` (seq=${meta.seq})`
+            : '';
         this.log(
-          `${context} write failed (${err.message || err}); retrying in ${backoff}ms`
+          `${context}${extra} write failed (${err.message || err}); retrying in ${backoff}ms`
         );
         await delay(backoff);
       }
@@ -378,9 +403,10 @@ class TMbotBleClient {
     await this.ensureConnected();
     await this.pauseStatus();
     const payload = this.encodeGrid(grid);
-    if (payload.length > CHUNK_DATA_SIZE) {
-      this.log(
-        `Inline payload is ${payload.length} bytes (> ${CHUNK_DATA_SIZE}). Prefer chunked mode for reliability.`
+    this.log(`Inline send requested: payload=${payload.length}B, maxFrame=${MAX_WRITE_BYTES}B`);
+    if (payload.length > MAX_WRITE_BYTES) {
+      throw new Error(
+        `Inline payload ${payload.length}B exceeds ATT write budget ${MAX_WRITE_BYTES}B`
       );
     }
     this.transferInProgress = true;
@@ -415,10 +441,21 @@ class TMbotBleClient {
     await this.ensureConnected();
     await this.pauseStatus();
     const payload = this.encodeGrid(grid);
+    if (MAX_CHUNK_PAYLOAD <= 0) {
+      throw new Error('Invalid chunk payload budget');
+    }
+    const estimatedChunks = Math.ceil(payload.length / MAX_CHUNK_PAYLOAD);
+    this.log(
+      `Chunked send requested: payload=${payload.length}B, maxFrame=${MAX_WRITE_BYTES}B, maxChunkPayload=${MAX_CHUNK_PAYLOAD}B, estimatedChunks=${estimatedChunks}`
+    );
+    if (payload.length === 0) {
+      throw new Error('Cannot send empty payload');
+    }
     const state = {
       totalLength: payload.length,
       offset: 0,
-      startSent: false
+      startSent: false,
+      seq: 0
     };
 
     this.transferInProgress = true;
@@ -438,17 +475,22 @@ class TMbotBleClient {
         }
 
         while (state.offset < state.totalLength) {
-          const chunkLength = Math.min(CHUNK_DATA_SIZE, state.totalLength - state.offset);
+          const remaining = state.totalLength - state.offset;
+          const chunkLength = Math.min(MAX_CHUNK_PAYLOAD, remaining);
           const currentOffset = state.offset;
           const frame = this.createChunkFrame(payload, currentOffset, chunkLength);
+          this.log(
+            `Preparing chunk seq=${state.seq}, offset=${currentOffset}, payload=${chunkLength}B, frame=${frame.byteLength}B, remaining=${remaining - chunkLength}B`
+          );
           const result = await this.writeWithRecovery(
             () => this.writeFrame(frame),
             `chunk@${currentOffset}`,
             state,
-            { offset: currentOffset }
+            { offset: currentOffset, seq: state.seq }
           );
           if (!result.skip) {
             state.offset = currentOffset + chunkLength;
+            state.seq += 1;
           }
           await delay(CHUNK_DELAY_MS);
         }
@@ -468,7 +510,9 @@ class TMbotBleClient {
           continue;
         }
 
-        this.log('Chunked payload sent successfully');
+        this.log(
+          `Chunked payload sent successfully (${state.totalLength}B over ${state.seq} chunks)`
+        );
         break;
       }
     } finally {
@@ -480,6 +524,14 @@ class TMbotBleClient {
   }
 
   async writeFrame(frame) {
+    if (!(frame instanceof Uint8Array)) {
+      throw new Error('Frame must be a Uint8Array');
+    }
+    if (frame.byteLength > MAX_WRITE_BYTES) {
+      throw new Error(
+        `Frame length ${frame.byteLength} exceeds ATT write budget ${MAX_WRITE_BYTES}`
+      );
+    }
     const writeWithResponse = this.uploadCharacteristic.writeValueWithResponse
       ? this.uploadCharacteristic.writeValueWithResponse.bind(this.uploadCharacteristic)
       : null;

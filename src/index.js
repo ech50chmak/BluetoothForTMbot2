@@ -56,6 +56,11 @@ bleno.on('accept', clientAddress => {
 
 bleno.on('disconnect', clientAddress => {
   console.log(`Disconnected from ${clientAddress}`);
+  if (gridService.uploadCharacteristic) {
+    gridService.uploadCharacteristic.handleDisconnect(
+      `Client disconnected (${clientAddress})`
+    );
+  }
 });
 
 process.on('SIGINT', () => {

@@ -6,8 +6,9 @@ Node.js BLE gateway for Raspberry Pi 4 inspired by `balena-web-ble`. The gateway
 
 - `TMGridService` (UUID `12345678-1234-5678-1234-56789abc0000`) publishes:
   - `GridUploadCharacteristic` (`write`, UUID `...0001`) with write-with-response, START/CHUNK/END framing, inactivity timeout, and verbose logging.
-  - `GridStatusCharacteristic` (`read`, `notify`, UUID `...0002`) that streams status snapshots using framed 20-byte notifications (START/CONT/END) so browsers with small MTU stay happy.
-- START/CHUNK/END protocol with MAX_CHUNK = 20 bytes and optional inline mode for very small payloads.
+- `GridStatusCharacteristic` (`read`, `notify`, UUID `...0002`) that streams status snapshots using framed 20-byte notifications (START/CONT/END) so browsers with small MTU stay happy.
+- Status snapshots now expose `lastFrameType`, `lastChunkLen`, and `lastSeq` to ease debugging of active transfers.
+- START/CHUNK/END protocol sized for ATT MTU 23 (20-byte writes): 1-byte opcode + ≤19-byte payload chunks, optional inline mode for very small payloads.
 - Atomic file writes to `GRID_PAYLOAD_PATH` via temporary files to prevent partial reads.
 - Optional `GRID_COMMAND` + `GRID_COMMAND_ARGS` execution after a successful upload, with exit-code tracking in status.
 - Centralised `GridState` (ES6 class) that validates payloads, enforces size limits, stores snapshots, logs every transition, and broadcasts updates.
@@ -58,9 +59,24 @@ Environment variables:
 | `GRID_COMMAND`       | Optional command executed after a successful upload       | -                            |
 | `GRID_COMMAND_ARGS`  | Command arguments (JSON array or whitespace/comma list)   | -                            |
 | `GRID_TRANSFER_TIMEOUT_MS` | Transfer inactivity timeout before reset (ms)         | `30000`                      |
-| `GRID_CHUNK_MAX`   | Maximum accepted chunk payload size (bytes)            | `20`                         |
+| `GRID_CHUNK_MAX`   | Maximum accepted chunk payload size (bytes, excludes opcode) | `19`                         |
 
-Chunked transfers default to 20-byte payload slices (MTU ~ 23). Adjust `GRID_CHUNK_MAX` if your adapter negotiates a larger MTU, keeping client and server in sync.
+Chunked transfers default to 20-byte writes (ATT MTU 23): 1-byte frame header + ≤19-byte payload. Adjust `GRID_CHUNK_MAX` (payload portion) if your adapter negotiates a larger MTU, keeping client and server in sync.
+
+## BLE framing limits
+
+- `ATT_MTU = 23` ⇒ `MAX_WRITE_BYTES = 20` usable bytes in a single GATT write (`writeValueWithResponse`).
+- Upload frames reserve `PROTO_OVERHEAD = 1` byte for the opcode (`START`, `CHUNK`, `END`, `CANCEL`).
+- `MAX_CHUNK_PAYLOAD = MAX_WRITE_BYTES - PROTO_OVERHEAD = 19` bytes. The browser client and server both enforce this budget.
+
+Example: JSON payload `[[[0,0],[0,0]],[[0,0],[0,0]]]` encodes to 27 bytes. The client sends:
+
+1. `START` frame (5 bytes: opcode + little-endian length).
+2. `CHUNK#0` (1-byte opcode + 19-byte payload slice).
+3. `CHUNK#1` (1-byte opcode + 8-byte payload slice).
+4. `END` (1 byte).
+
+If you extend the header (e.g. add sequence or checksum fields), subtract that extra overhead from `MAX_CHUNK_PAYLOAD` and update `GRID_CHUNK_MAX` accordingly so writes stay ≤20 bytes.
 
 Example:
 
@@ -101,7 +117,7 @@ Serve `web/index.html` over HTTPS (or `http://localhost`) in Chrome/Edge/Brave w
 
 - **Connect** - pairs and subscribes to the status characteristic (log output + live JSON in the UI).
 - **Send (inline)** - writes a single frame using `writeValueWithResponse`. Recommended for payloads <= 100 bytes.
-- **Send (chunked)** - always uses START/CHUNK/END frames (MAX_CHUNK = 20 bytes) with exponential retry on transient errors.
+- **Send (chunked)** - always uses START/CHUNK/END frames (20-byte writes: 1-byte opcode + ≤19-byte payload) with exponential retry on transient errors.
 - During transfers status notifications are paused and resumed to avoid parallel GATT operations.
 - Status updates arrive as START/CONT/END frames and are reassembled in the browser before parsing, following the same pattern as Nordic UART / Web Bluetooth console samples.
 

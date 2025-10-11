@@ -9,7 +9,7 @@ const OPCODES = {
 
 const CHUNK_DATA_LIMIT = Math.max(
   1,
-  parseInt(process.env.GRID_CHUNK_MAX || '20', 10)
+  parseInt(process.env.GRID_CHUNK_MAX || '19', 10)
 );
 const INACTIVITY_TIMEOUT_MS = Math.max(
   1,
@@ -33,14 +33,20 @@ class GridUploadCharacteristic extends Characteristic {
     this.buffer = Buffer.alloc(0);
     this.expectedLength = null;
     this.inactivityTimer = null;
+    this.chunkSequence = 0;
+    console.log(
+      `[BLE] GridUploadCharacteristic configured (chunkLimit=${CHUNK_DATA_LIMIT}B, timeout=${INACTIVITY_TIMEOUT_MS}ms)`
+    );
   }
 
   onWriteRequest(data, offset, withoutResponse, callback) {
+    const mode = withoutResponse ? 'writeCmd' : 'writeReq';
     console.log(
-      `[BLE] write received (len=${data.length}, offset=${offset}, expected=${this.expectedLength ?? 'n/a'})`
+      `[BLE] write received (mode=${mode}, len=${data.length}, offset=${offset}, expected=${this.expectedLength ?? 'n/a'})`
     );
 
     if (offset) {
+      console.warn(`[BLE] write rejected: expected offset 0, got ${offset}`);
       callback(this.RESULT_ATTR_NOT_LONG);
       return;
     }
@@ -102,6 +108,9 @@ class GridUploadCharacteristic extends Characteristic {
     if (data.length < 5) {
       throw new Error('START frame requires 4-byte length');
     }
+    if (data.length > 5) {
+      console.warn(`[BLE] START frame contained unexpected payload (len=${data.length})`);
+    }
 
     if (this.expectedLength !== null) {
       this.state.cancelReception('New START received mid-transfer, resetting session');
@@ -118,6 +127,7 @@ class GridUploadCharacteristic extends Characteristic {
 
     this.resetReception();
     this.expectedLength = expected;
+    this.chunkSequence = 0;
     this.state.startReception(expected);
     this.resetInactivityTimer();
     console.log(`[BLE] START accepted (expected=${expected})`);
@@ -130,6 +140,9 @@ class GridUploadCharacteristic extends Characteristic {
     }
     const chunk = data.subarray(1);
     if (!chunk.length || chunk.length > CHUNK_DATA_LIMIT) {
+      console.warn(
+        `[BLE] CHUNK length ${chunk.length} outside allowed range (1-${CHUNK_DATA_LIMIT})`
+      );
       throw new Error(`Invalid chunk length (${chunk.length})`);
     }
     const before = this.buffer.length;
@@ -138,9 +151,15 @@ class GridUploadCharacteristic extends Characteristic {
       throw new Error('Received more bytes than declared');
     }
     const receivedBytes = this.buffer.length;
-    this.state.progressReception(receivedBytes);
+    const seq = this.chunkSequence;
+    this.chunkSequence += 1;
+    this.state.progressReception(receivedBytes, {
+      chunkLength: chunk.length,
+      seq,
+      frame: 'CHUNK'
+    });
     console.log(
-      `[BLE] CHUNK received (offset=${receivedBytes - chunk.length}, chunk=${chunk.length}, total=${receivedBytes}/${this.expectedLength})`
+      `[BLE] CHUNK received (seq=${seq}, offset=${before}, chunk=${chunk.length}, total=${receivedBytes}/${this.expectedLength}, limit=${CHUNK_DATA_LIMIT})`
     );
     this.resetInactivityTimer();
     return 'chunk';
@@ -158,9 +177,19 @@ class GridUploadCharacteristic extends Characteristic {
         `END received but payload size mismatch (${this.buffer.length}/${this.expectedLength})`
       );
     }
-    console.log(`[BLE] END received (bytes=${this.buffer.length})`);
+    const totalBytes = this.buffer.length;
+    console.log(`[BLE] END received (bytes=${totalBytes})`);
+    this.state.update(
+      {
+        lastFrameType: 'END',
+        lastChunkLen: 0
+      },
+      `END frame accepted (${totalBytes} bytes)`
+    );
     this.clearInactivityTimer();
-    return Buffer.from(this.buffer);
+    const payload = Buffer.from(this.buffer);
+    this.expectedLength = null;
+    return payload;
   }
 
   handleCancel() {
@@ -175,6 +204,17 @@ class GridUploadCharacteristic extends Characteristic {
       throw new Error('Inline payload not allowed during chunked transfer');
     }
     console.log(`[BLE] Inline payload received (${data.length} bytes)`);
+    this.state.update(
+      {
+        lastFrameType: 'INLINE',
+        lastSeq: 0,
+        lastChunkLen: data.length,
+        receiving: false,
+        expectedBytes: data.length,
+        receivedBytes: data.length
+      },
+      `inline payload received (${data.length} bytes)`
+    );
     return Buffer.from(data);
   }
 
@@ -182,6 +222,7 @@ class GridUploadCharacteristic extends Characteristic {
     this.buffer = Buffer.alloc(0);
     this.expectedLength = null;
     this.clearInactivityTimer();
+    this.chunkSequence = 0;
   }
 
   handleError(err) {
@@ -196,6 +237,7 @@ class GridUploadCharacteristic extends Characteristic {
 
   resetInactivityTimer() {
     this.clearInactivityTimer();
+    console.log(`[BLE] inactivity timer reset (${INACTIVITY_TIMEOUT_MS}ms)`);
     this.inactivityTimer = setTimeout(() => {
       console.warn('[BLE] Transfer timed out due to inactivity');
       this.state.cancelReception('Transfer timed out (no activity)');
@@ -208,6 +250,24 @@ class GridUploadCharacteristic extends Characteristic {
       clearTimeout(this.inactivityTimer);
       this.inactivityTimer = null;
     }
+  }
+
+  handleDisconnect(reason = 'Client disconnected') {
+    const awaitingFrames = this.expectedLength !== null;
+    if (awaitingFrames) {
+      this.state.cancelReception(reason);
+    } else {
+      this.state.update(
+        {
+          receiving: false,
+          expectedBytes: null,
+          lastFrameType: 'DISCONNECT',
+          lastChunkLen: 0
+        },
+        reason
+      );
+    }
+    this.resetReception();
   }
 }
 
