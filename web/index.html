@@ -8,78 +8,99 @@
         font-family: sans-serif;
         margin: 2rem;
         background: #f7f7f7;
+        color: #222;
       }
       textarea {
         width: 100%;
-        min-height: 200px;
+        min-height: 180px;
         font-family: monospace;
         padding: 1rem;
         box-sizing: border-box;
       }
       button {
         padding: 0.6rem 1.2rem;
-        margin-top: 0.5rem;
+        margin: 0.3rem 0.3rem 0.3rem 0;
         cursor: pointer;
       }
-      #status {
+      #status,
+      #log {
         margin-top: 1rem;
-        padding: 0.5rem;
+        padding: 0.75rem;
         background: #fff;
         border: 1px solid #ccc;
-        min-height: 4rem;
+        min-height: 6rem;
         font-family: monospace;
         overflow: auto;
         white-space: pre;
+      }
+      #log {
+        max-height: 240px;
       }
     </style>
   </head>
   <body>
     <h1>TMbot Web Bluetooth uploader</h1>
     <p>
-      Paste the grid JSON in the format <code>[[[x0,y0],...],[...]]</code> and press "Send".
-      The page uses the START/CHUNK protocol automatically and shows status updates.
+      Paste the grid JSON in the format <code>[[[x0,y0],...],[...]]</code> and use one of the send
+      buttons. Inline mode writes a single frame (&lt;= 100 bytes), chunked mode always uses the
+      START/CHUNK/END protocol.
     </p>
     <textarea
       id="grid-input"
-      placeholder="[[[0,0],[1,0]],[[2,1],[2,2]]]"
+      placeholder="[[[0,0],[1,0],[2,0]],[[3,1],[3,2]]]"
       spellcheck="false"
     ></textarea>
     <div>
-      <button id="btn-send">Send to TMbot</button>
+      <button id="btn-connect">Connect</button>
+      <button id="btn-send-inline">Send (inline)</button>
+      <button id="btn-send-chunk">Send (chunked)</button>
     </div>
-    <div id="status">BLE status will appear after connecting...</div>
+    <div id="status">BLE status will appear here.</div>
+    <div id="log">Logs will appear here.</div>
     <script type="module">
-      import { sendTileGrid } from './grid-client.js';
+      import { setupClient } from './grid-client.js';
 
       const textarea = document.getElementById('grid-input');
-      const button = document.getElementById('btn-send');
       const statusBox = document.getElementById('status');
+      const logBox = document.getElementById('log');
 
-      function printStatus(payload) {
-        statusBox.textContent = JSON.stringify(payload, null, 2);
-      }
+      const client = setupClient({ statusBox, logBox });
 
-      button.addEventListener('click', async () => {
-        let grid;
+      function parseGridInput() {
         try {
-          grid = JSON.parse(textarea.value);
+          return JSON.parse(textarea.value);
         } catch (err) {
           alert('Invalid JSON: ' + err.message);
-          return;
+          throw err;
         }
+      }
 
+      document.getElementById('btn-connect').addEventListener('click', async () => {
         try {
-          const bytes = await sendTileGrid(grid, {
-            onStatus: printStatus,
-            awaitStable: 500
-          });
-          printStatus({
-            message: `Sent ${bytes} bytes, waiting for robot acknowledgement`
-          });
+          await client.ensureConnected();
         } catch (err) {
-          printStatus({ error: err.message });
+          logBox.textContent += `[${new Date().toISOString()}] Connect error: ${err.message}\n`;
+        }
+      });
+
+      document.getElementById('btn-send-inline').addEventListener('click', async () => {
+        try {
+          const grid = parseGridInput();
+          await client.sendInline(grid);
+        } catch (err) {
+          logBox.textContent += `[${new Date().toISOString()}] Inline send error: ${err.message}\n`;
+        }
+      });
+
+      document.getElementById('btn-send-chunk').addEventListener('click', async () => {
+        try {
+          const grid = parseGridInput();
+          await client.sendChunked(grid);
+        } catch (err) {
+          logBox.textContent += `[${new Date().toISOString()}] Chunked send error: ${err.message}\n`;
         }
       });
     </script>
   </body>
 </html>
+

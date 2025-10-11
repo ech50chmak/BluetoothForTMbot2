@@ -30,7 +30,9 @@ class GridState extends EventEmitter {
       receivedBytes: 0,
       maxBytes: this.maxBytes,
       lastCommand: null,
-      fileSize: 0
+      fileSize: 0,
+      lastMessage: null,
+      lastSnapshot: null
     };
   }
 
@@ -50,12 +52,25 @@ class GridState extends EventEmitter {
     };
   }
 
-  update(patch = {}) {
+  update(patch = {}, extra = null) {
+    const message =
+      typeof extra === 'string'
+        ? extra
+        : extra && typeof extra === 'object'
+        ? extra.message || null
+        : null;
+
     this.status = {
       ...this.status,
       ...patch,
+      ...(message ? { lastMessage: message } : {}),
       timestamp: new Date().toISOString()
     };
+
+    if (message) {
+      console.log(`[STATE] ${message}`);
+    }
+
     this.emit('status', this.snapshot());
   }
 
@@ -66,14 +81,14 @@ class GridState extends EventEmitter {
       receivedBytes: 0,
       lastError: null,
       ok: true
-    });
+    }, `transfer started (expecting ${expectedBytes} bytes)`);
   }
 
   progressReception(receivedBytes) {
     this.update({
       receiving: true,
       receivedBytes
-    });
+    }, `chunk received (${receivedBytes}/${this.status.expectedBytes || '?'})`);
   }
 
   cancelReception(message) {
@@ -83,14 +98,14 @@ class GridState extends EventEmitter {
       receivedBytes: 0,
       ok: false,
       lastError: message || 'Transfer cancelled'
-    });
+    }, message || 'transfer cancelled');
   }
 
   markError(message) {
     this.update({
       ok: false,
       lastError: message
-    });
+    }, message);
   }
 
   async handlePayload(buffer) {
@@ -136,22 +151,25 @@ class GridState extends EventEmitter {
     await this.persist(serialized);
     const stats = await this.safeStat(this.gridPath);
 
-    this.update({
-      ok: true,
-      lastError: null,
-      lastSavedAt: savedAt,
-      lastBytes: buffer.length,
-      lastPayloadHash: hash,
+    this.update(
+      {
+        ok: true,
+        lastError: null,
+        lastSavedAt: savedAt,
+        lastBytes: buffer.length,
+        lastPayloadHash: hash,
       receiving: false,
       expectedBytes: null,
       receivedBytes: buffer.length,
       fileSize: stats ? stats.size : buffer.length,
-      lastSnapshot: {
-        receivedAt: savedAt,
-        bytes: buffer.length,
-        sample: this.previewGrid(parsed)
-      }
-    });
+        lastSnapshot: {
+          receivedAt: savedAt,
+          bytes: buffer.length,
+          sample: this.previewGrid(parsed)
+        }
+      },
+      `grid persisted (${buffer.length} bytes, hash ${hash.slice(0, 8)})`
+    );
 
     this.runCommand();
   }
@@ -229,7 +247,7 @@ class GridState extends EventEmitter {
       startedAt,
       running: true
     };
-    this.update({ lastCommand: baseInfo });
+    this.update({ lastCommand: baseInfo }, `launching command ${this.command}`);
 
     const child = spawn(this.command, this.commandArgs, {
       stdio: 'inherit',
@@ -237,16 +255,19 @@ class GridState extends EventEmitter {
     });
 
     child.once('error', err => {
-      this.update({
-        ok: false,
-        lastError: `Command failed to start: ${err.message}`,
-        lastCommand: {
-          ...baseInfo,
-          running: false,
-          error: err.message,
-          exitedAt: new Date().toISOString()
-        }
-      });
+      this.update(
+        {
+          ok: false,
+          lastError: `Command failed to start: ${err.message}`,
+          lastCommand: {
+            ...baseInfo,
+            running: false,
+            error: err.message,
+            exitedAt: new Date().toISOString()
+          }
+        },
+        `command failed to start: ${err.message}`
+      );
     });
 
     child.once('exit', (code, signal) => {
@@ -260,15 +281,20 @@ class GridState extends EventEmitter {
         signal
       };
 
-      this.update({
-        lastCommand: commandStatus,
-        ...(failed
-          ? {
-              ok: false,
-              lastError: `Command exited with code ${code}`
-            }
-          : {})
-      });
+      this.update(
+        {
+          lastCommand: commandStatus,
+          ...(failed
+            ? {
+                ok: false,
+                lastError: `Command exited with code ${code}`
+              }
+            : {})
+        },
+        failed
+          ? `command exited with code ${code}`
+          : 'command completed successfully'
+      );
     });
   }
 }
