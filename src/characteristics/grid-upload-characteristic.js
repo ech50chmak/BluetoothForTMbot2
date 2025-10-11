@@ -13,7 +13,7 @@ const CHUNK_DATA_LIMIT = Math.max(
 );
 const INACTIVITY_TIMEOUT_MS = Math.max(
   1,
-  parseInt(process.env.GRID_TRANSFER_TIMEOUT_MS || '30000', 10)
+  parseInt(process.env.GRID_TRANSFER_TIMEOUT_MS || '5000', 10)
 );
 
 class GridUploadCharacteristic extends Characteristic {

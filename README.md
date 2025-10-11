@@ -58,7 +58,7 @@ Environment variables:
 | `GRID_MAX_BYTES`     | Maximum accepted payload size (bytes)                     | `1048576` (1 MiB)            |
 | `GRID_COMMAND`       | Optional command executed after a successful upload       | -                            |
 | `GRID_COMMAND_ARGS`  | Command arguments (JSON array or whitespace/comma list)   | -                            |
-| `GRID_TRANSFER_TIMEOUT_MS` | Transfer inactivity timeout before reset (ms)         | `30000`                      |
+| `GRID_TRANSFER_TIMEOUT_MS` | Transfer inactivity timeout before reset (ms)         | `5000`                       |
 | `GRID_CHUNK_MAX`   | Maximum accepted chunk payload size (bytes, excludes opcode) | `19`                         |
 
 Chunked transfers default to 20-byte writes (ATT MTU 23): 1-byte frame header + ≤19-byte payload. Adjust `GRID_CHUNK_MAX` (payload portion) if your adapter negotiates a larger MTU, keeping client and server in sync.
@@ -144,7 +144,7 @@ await tmBle.sendChunked(bigGrid);
 | --- | --- |
 | `GATT operation failed for unknown reason` | Ensure the client uses `writeValueWithResponse` (inline button or bleak script). Retry with chunked mode; Chrome on Windows occasionally needs a reconnect. |
 | Transfer stops at START/first CHUNK | Check server logs for `Transfer timed out` or length mismatch. Verify the END frame is sent and total size <= `GRID_MAX_BYTES`. |
-| Browser disconnects after 15 seconds | Idle timeout is triggered. Send the next CHUNK within 20 seconds or re-start with a new START frame. |
+| Browser disconnects after 10 seconds | Idle timeout is triggered. Send the next CHUNK within 5 seconds or re-start with a new START frame. |
 | No file written to `GRID_PAYLOAD_PATH` | Inspect status notifications (`lastError`, `lastMessage`). Confirm the service has write permissions to the target path. |
 | Command exits with non-zero code | Review `lastCommand.code` in status and the process output in server logs. |
 
