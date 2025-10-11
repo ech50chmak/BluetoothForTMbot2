@@ -15,11 +15,14 @@ const STATUS_OPCODES = {
   END: 0x03
 };
 
-const UPLOAD_MAX_CHUNK = 180;
+const CHUNK_DATA_SIZE = 20;
+const CHUNK_DELAY_MS = 30;
 const RETRY_DELAYS_MS = [150, 300, 600, 1200];
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 function appendUint8Arrays(a, b) {
   const result = new Uint8Array(a.length + b.length);
@@ -38,6 +41,8 @@ class TMbotBleClient {
     this.statusCharacteristic = null;
     this.statusListener = null;
     this.statusAssembler = this.createAssembler();
+    this.statusPaused = false;
+    this.transferInProgress = false;
   }
 
   createAssembler() {
@@ -53,29 +58,49 @@ class TMbotBleClient {
   }
 
   async ensureConnected(options = {}) {
-    if (this.server && this.server.connected) {
+    if (this.server && this.server.connected && !options.forceRefresh) {
       return;
     }
-    if (!navigator.bluetooth) {
-      throw new Error('Web Bluetooth API is not available in this browser');
+    if (!this.device) {
+      if (!navigator.bluetooth) {
+        throw new Error('Web Bluetooth API is not available in this browser');
+      }
+      const namePrefix = options.namePrefix || 'TMbot';
+      this.log(`Requesting Bluetooth device with prefix "${namePrefix}"`);
+      this.device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix }],
+        optionalServices: [SERVICE_UUID]
+      });
+      this.device.addEventListener('gattserverdisconnected', () => {
+        this.log('Device disconnected');
+        this.server = null;
+        this.resetAssembler();
+      });
     }
-    const namePrefix = options.namePrefix || 'TMbot';
-    this.log(`Requesting Bluetooth device with prefix "${namePrefix}"`);
-    this.device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix }],
-      optionalServices: [SERVICE_UUID]
-    });
-    this.device.addEventListener('gattserverdisconnected', () => {
-      this.log('Device disconnected');
-      this.resetAssembler();
-    });
 
-    this.server = await this.device.gatt.connect();
+    if (!this.device.gatt.connected || options.forceRefresh) {
+      this.server = await this.device.gatt.connect();
+    } else {
+      this.server = this.device.gatt;
+    }
+
     this.service = await this.server.getPrimaryService(SERVICE_UUID);
     this.uploadCharacteristic = await this.service.getCharacteristic(UPLOAD_CHAR_UUID);
     this.statusCharacteristic = await this.service.getCharacteristic(STATUS_CHAR_UUID);
 
-    await this.subscribeStatus();
+    if (this.statusListener) {
+      this.statusCharacteristic.removeEventListener(
+        'characteristicvaluechanged',
+        this.statusListener
+      );
+      this.statusListener = null;
+    }
+
+    this.resetAssembler();
+    this.statusPaused = true;
+    if (!options.skipStatusSubscribe) {
+      await this.subscribeStatus();
+    }
     this.log('Connected to TMbot service');
   }
 
@@ -84,6 +109,8 @@ class TMbotBleClient {
       return;
     }
     await this.statusCharacteristic.startNotifications();
+    this.resetAssembler();
+    this.statusPaused = false;
     this.statusListener = event => {
       this.handleStatusNotification(event).catch(err =>
         this.log(`STATUS decode error: ${err.message}`)
@@ -95,26 +122,32 @@ class TMbotBleClient {
     );
     try {
       const value = await this.statusCharacteristic.readValue();
-      const json = textDecoder.decode(value);
-      this.processStatus(json);
+      const view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+      if (view.length) {
+        this.processStatus(textDecoder.decode(view));
+      }
     } catch (err) {
       this.log(`STATUS read error: ${err.message}`);
     }
   }
 
   async handleStatusNotification(event) {
-    const view = event.target.value;
-    const frame = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
-    if (frame.length === 0) {
-      throw new Error('Empty notification');
+    const view = new Uint8Array(
+      event.target.value.buffer,
+      event.target.value.byteOffset,
+      event.target.value.byteLength
+    );
+    if (!view.length) {
+      throw new Error('Empty notification frame');
     }
-    const opcode = frame[0];
+    const opcode = view[0];
+
     if (opcode === STATUS_OPCODES.START) {
-      if (frame.length < 5) {
+      if (view.length < 5) {
         throw new Error('START frame too short');
       }
-      const expected = new DataView(frame.buffer, frame.byteOffset + 1, 4).getUint32(0, true);
-      const chunk = frame.slice(5);
+      const expected = new DataView(view.buffer, view.byteOffset + 1, 4).getUint32(0, true);
+      const chunk = view.slice(5);
       if (chunk.length > expected) {
         throw new Error('START chunk longer than expected');
       }
@@ -128,12 +161,12 @@ class TMbotBleClient {
 
     if (opcode === STATUS_OPCODES.CONT) {
       if (this.statusAssembler.expected == null) {
-        throw new Error('CONT frame without START');
+        throw new Error('CONT frame received before START');
       }
-      const chunk = frame.slice(1);
+      const chunk = view.slice(1);
       const combined = appendUint8Arrays(this.statusAssembler.buffer, chunk);
       if (combined.length > this.statusAssembler.expected) {
-        throw new Error('Status payload exceeds declared length');
+        throw new Error('Status payload exceeds expected length');
       }
       this.statusAssembler.buffer = combined;
       this.statusAssembler.complete =
@@ -142,18 +175,6 @@ class TMbotBleClient {
     }
 
     if (opcode === STATUS_OPCODES.END) {
-      if (this.statusAssembler.expected == null) {
-        this.log('STATUS warning: END without START');
-        this.resetAssembler();
-        return;
-      }
-      if (!this.statusAssembler.complete) {
-        this.log(
-          `STATUS warning: END before receiving full payload (${this.statusAssembler.buffer.length}/${this.statusAssembler.expected})`
-        );
-        this.resetAssembler();
-        return;
-      }
       this.flushStatusBuffer();
       return;
     }
@@ -162,20 +183,70 @@ class TMbotBleClient {
   }
 
   flushStatusBuffer() {
+    const { expected, buffer, complete } = this.statusAssembler;
+    if (expected == null) {
+      this.log('STATUS warning: END received without START');
+      this.resetAssembler();
+      return;
+    }
+    if (!complete) {
+      this.log(
+        `STATUS warning: END received before payload complete (${buffer.length}/${expected})`
+      );
+      this.resetAssembler();
+      return;
+    }
     try {
-      const json = textDecoder.decode(this.statusAssembler.buffer);
-      this.processStatus(json);
+      this.processStatus(textDecoder.decode(buffer));
+    } catch (err) {
+      this.log(`STATUS decode error: ${err.message}`);
     } finally {
       this.resetAssembler();
     }
   }
 
   processStatus(jsonString) {
-    const payload = JSON.parse(jsonString);
-    this.log(`STATUS ${JSON.stringify(payload)}`);
-    if (typeof window !== 'undefined' && window.tmBleUpdateStatus) {
-      window.tmBleUpdateStatus(payload);
+    try {
+      const payload = JSON.parse(jsonString);
+      this.log(`STATUS ${JSON.stringify(payload)}`);
+      if (typeof window !== 'undefined' && window.tmBleUpdateStatus) {
+        window.tmBleUpdateStatus(payload);
+      }
+    } catch (err) {
+      this.log(`STATUS parse error: ${err.message}`);
     }
+  }
+
+  async pauseStatus() {
+    if (!this.statusCharacteristic || this.statusPaused) {
+      return;
+    }
+    try {
+      await this.statusCharacteristic.stopNotifications();
+    } catch (err) {
+      this.log(`STATUS pause warning: ${err.message}`);
+    }
+    this.statusPaused = true;
+    this.log('Status notifications paused');
+  }
+
+  async resumeStatus() {
+    if (!this.statusCharacteristic) {
+      return;
+    }
+    if (!this.statusListener) {
+      this.resetAssembler();
+      await this.subscribeStatus();
+      this.log('Status notifications resumed');
+      return;
+    }
+    if (!this.statusPaused) {
+      return;
+    }
+    await this.statusCharacteristic.startNotifications();
+    this.resetAssembler();
+    this.statusPaused = false;
+    this.log('Status notifications resumed');
   }
 
   async disconnect() {
@@ -186,52 +257,226 @@ class TMbotBleClient {
       );
     }
     this.statusListener = null;
+    this.statusPaused = false;
     this.resetAssembler();
     if (this.server && this.server.connected) {
       this.server.disconnect();
     }
   }
 
-  async sendInline(grid) {
-    await this.ensureConnected();
-    const payload = this.encodeGrid(grid);
-    if (payload.length > 100) {
-      this.log(
-        `Inline payload is ${payload.length} bytes (>100). Prefer chunked mode for reliability.`
-      );
-    }
-    await this.writeFrame(payload);
-    this.log(`Inline payload sent (${payload.length} bytes)`);
+  createStartFrame(totalLength) {
+    const frame = new Uint8Array(5);
+    const view = new DataView(frame.buffer);
+    frame[0] = UPLOAD_OPCODES.START;
+    view.setUint32(1, totalLength, true);
+    return frame;
   }
 
-  async sendChunked(grid) {
-    await this.ensureConnected();
-    const payload = this.encodeGrid(grid);
-    const total = payload.length;
-
-    const startFrame = new Uint8Array(5);
-    const view = new DataView(startFrame.buffer);
-    startFrame[0] = UPLOAD_OPCODES.START;
-    view.setUint32(1, total, true);
-    await this.writeFrame(startFrame);
-    this.log(`START sent (${total} bytes total)`);
-
-    for (let offset = 0; offset < total; offset += UPLOAD_MAX_CHUNK) {
-      const chunkLength = Math.min(UPLOAD_MAX_CHUNK, total - offset);
-      const frame = new Uint8Array(chunkLength + 1);
-      frame[0] = UPLOAD_OPCODES.CHUNK;
-      frame.set(payload.subarray(offset, offset + chunkLength), 1);
-      await this.writeFrame(frame);
-      this.log(`CHUNK sent (${Math.min(offset + chunkLength, total)}/${total})`);
-    }
-
-    await this.writeFrame(new Uint8Array([UPLOAD_OPCODES.END]));
-    this.log('END sent');
+  createChunkFrame(payload, offset, length) {
+    const frame = new Uint8Array(length + 1);
+    frame[0] = UPLOAD_OPCODES.CHUNK;
+    frame.set(payload.subarray(offset, offset + length), 1);
+    return frame;
   }
 
   encodeGrid(grid) {
     const json = typeof grid === 'string' ? grid : JSON.stringify(grid);
     return textEncoder.encode(json);
+  }
+
+  async readStatusSnapshot() {
+    if (!this.statusCharacteristic) {
+      return null;
+    }
+    const value = await this.statusCharacteristic.readValue();
+    const view = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    if (!view.length) {
+      return null;
+    }
+    try {
+      return JSON.parse(textDecoder.decode(view));
+    } catch (err) {
+      this.log(`STATUS snapshot parse error: ${err.message}`);
+      return null;
+    }
+  }
+
+  isDisconnectError(error) {
+    const message = (error && error.message ? error.message : String(error)).toLowerCase();
+    return (
+      message.includes('disconnected') ||
+      message.includes('not connected') ||
+      message.includes('connection')
+    );
+  }
+
+  async recoverConnection(totalLength) {
+    this.log('Attempting BLE reconnection...');
+    await this.ensureConnected({ skipStatusSubscribe: true, forceRefresh: true });
+    await this.pauseStatus();
+    try {
+      const snapshot = await this.readStatusSnapshot();
+      if (snapshot && snapshot.expectedBytes === totalLength) {
+        return {
+          offset: typeof snapshot.receivedBytes === 'number' ? snapshot.receivedBytes : 0,
+          startAcked: !!snapshot.receiving || (snapshot.receivedBytes || 0) > 0
+        };
+      }
+    } catch (err) {
+      this.log(`Recover status read failed: ${err.message}`);
+    }
+    return { offset: 0, startAcked: false };
+  }
+
+  async writeWithRecovery(operation, context, state, meta = {}) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await operation();
+        return { skip: false };
+      } catch (err) {
+        if (!this.shouldRetry(err, attempt)) {
+          throw err;
+        }
+        const backoff = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
+        let skip = false;
+        if (this.isDisconnectError(err)) {
+          const recovery = await this.recoverConnection(state.totalLength);
+          state.startSent = recovery.startAcked;
+          state.offset = recovery.offset;
+          if (context === 'start' && recovery.startAcked) {
+            this.log('Server already awaiting chunks; skipping duplicate START.');
+            skip = true;
+          }
+          if (context.startsWith('chunk') && typeof meta.offset === 'number') {
+            if (state.offset > meta.offset) {
+              this.log(
+                `Chunk at offset ${meta.offset} already acknowledged (server offset ${state.offset}).`
+              );
+              skip = true;
+            }
+          }
+          if (context === 'end' && state.offset < state.totalLength) {
+            this.log('Server still expects additional data; resuming chunk transfer.');
+            skip = true;
+          }
+        }
+        if (skip) {
+          return { skip: true };
+        }
+        this.log(
+          `${context} write failed (${err.message || err}); retrying in ${backoff}ms`
+        );
+        await delay(backoff);
+      }
+    }
+  }
+
+  async sendInline(grid) {
+    if (this.transferInProgress) {
+      throw new Error('Another transfer is already in progress');
+    }
+    await this.ensureConnected();
+    await this.pauseStatus();
+    const payload = this.encodeGrid(grid);
+    if (payload.length > CHUNK_DATA_SIZE) {
+      this.log(
+        `Inline payload is ${payload.length} bytes (> ${CHUNK_DATA_SIZE}). Prefer chunked mode for reliability.`
+      );
+    }
+    this.transferInProgress = true;
+    try {
+      const state = {
+        totalLength: payload.length,
+        offset: 0,
+        startSent: true
+      };
+      const result = await this.writeWithRecovery(
+        () => this.writeFrame(payload),
+        'inline',
+        state
+      );
+      if (result.skip) {
+        this.log('Inline payload acknowledged during recovery');
+      } else {
+        this.log(`Inline payload sent (${payload.length} bytes)`);
+      }
+    } finally {
+      this.transferInProgress = false;
+      await this.resumeStatus().catch(err =>
+        this.log(`STATUS resume warning: ${err.message}`)
+      );
+    }
+  }
+
+  async sendChunked(grid) {
+    if (this.transferInProgress) {
+      throw new Error('Another transfer is already in progress');
+    }
+    await this.ensureConnected();
+    await this.pauseStatus();
+    const payload = this.encodeGrid(grid);
+    const state = {
+      totalLength: payload.length,
+      offset: 0,
+      startSent: false
+    };
+
+    this.transferInProgress = true;
+    try {
+      while (true) {
+        if (!state.startSent) {
+          const startFrame = this.createStartFrame(state.totalLength);
+          const result = await this.writeWithRecovery(
+            () => this.writeFrame(startFrame),
+            'start',
+            state
+          );
+          state.startSent = true;
+          if (result.skip) {
+            this.log('START frame acknowledged during recovery');
+          }
+        }
+
+        while (state.offset < state.totalLength) {
+          const chunkLength = Math.min(CHUNK_DATA_SIZE, state.totalLength - state.offset);
+          const currentOffset = state.offset;
+          const frame = this.createChunkFrame(payload, currentOffset, chunkLength);
+          const result = await this.writeWithRecovery(
+            () => this.writeFrame(frame),
+            `chunk@${currentOffset}`,
+            state,
+            { offset: currentOffset }
+          );
+          if (!result.skip) {
+            state.offset = currentOffset + chunkLength;
+          }
+          await delay(CHUNK_DELAY_MS);
+        }
+
+        if (state.offset < state.totalLength) {
+          this.log('Server offset indicates pending bytes; continuing chunk transfer.');
+          continue;
+        }
+
+        const endResult = await this.writeWithRecovery(
+          () => this.writeFrame(new Uint8Array([UPLOAD_OPCODES.END])),
+          'end',
+          state
+        );
+        if (endResult.skip && state.offset < state.totalLength) {
+          this.log('END skipped due to pending bytes; resuming chunk loop.');
+          continue;
+        }
+
+        this.log('Chunked payload sent successfully');
+        break;
+      }
+    } finally {
+      this.transferInProgress = false;
+      await this.resumeStatus().catch(err =>
+        this.log(`STATUS resume warning: ${err.message}`)
+      );
+    }
   }
 
   async writeFrame(frame) {
@@ -247,24 +492,7 @@ class TMbotBleClient {
       throw new Error('Characteristic does not support write operations');
     }
 
-    let attempt = 0;
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      try {
-        await writeFn(frame);
-        return;
-      } catch (err) {
-        if (!this.shouldRetry(err, attempt)) {
-          throw err;
-        }
-        const delay = RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)];
-        this.log(
-          `write failed (${err.message || err}), retrying in ${delay}ms (attempt ${attempt + 1})`
-        );
-        await new Promise(resolve => setTimeout(resolve, delay));
-        attempt += 1;
-      }
-    }
+    await writeFn(frame);
   }
 
   shouldRetry(error, attempt) {
@@ -275,7 +503,8 @@ class TMbotBleClient {
     return (
       message.includes('gatt operation failed') ||
       message.includes('networkerror') ||
-      message.includes('device disconnected')
+      message.includes('device disconnected') ||
+      message.includes('already in progress')
     );
   }
 }

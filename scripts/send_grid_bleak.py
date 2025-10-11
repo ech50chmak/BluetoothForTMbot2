@@ -25,7 +25,7 @@ OPCODES = {
     "END": 0x04,
 }
 
-MAX_CHUNK = 180
+MAX_CHUNK = 20
 
 
 def load_grid(args: argparse.Namespace) -> bytes:
@@ -88,6 +88,7 @@ async def send_payload(args: argparse.Namespace) -> None:
                 print(
                     f"[INFO] chunk {offset + len(chunk)}/{total} bytes sent"
                 )
+                await asyncio.sleep(0.03)
             await client.write_gatt_char(
                 UPLOAD_CHAR_UUID, bytes([OPCODES["END"]]), response=True
             )

@@ -7,8 +7,14 @@ const OPCODES = {
   END: 0x04
 };
 
-const MAX_CHUNK = 180;
-const INACTIVITY_TIMEOUT_MS = 20000;
+const CHUNK_DATA_LIMIT = Math.max(
+  1,
+  parseInt(process.env.GRID_CHUNK_MAX || '20', 10)
+);
+const INACTIVITY_TIMEOUT_MS = Math.max(
+  1,
+  parseInt(process.env.GRID_TRANSFER_TIMEOUT_MS || '30000', 10)
+);
 
 class GridUploadCharacteristic extends Characteristic {
   constructor({ state, uuid }) {
@@ -123,18 +129,20 @@ class GridUploadCharacteristic extends Characteristic {
       throw new Error('CHUNK received before START');
     }
     const chunk = data.subarray(1);
-    if (!chunk.length || chunk.length > MAX_CHUNK) {
+    if (!chunk.length || chunk.length > CHUNK_DATA_LIMIT) {
       throw new Error(`Invalid chunk length (${chunk.length})`);
     }
+    const before = this.buffer.length;
     this.buffer = Buffer.concat([this.buffer, chunk]);
     if (this.buffer.length > this.expectedLength) {
       throw new Error('Received more bytes than declared');
     }
-    this.state.progressReception(this.buffer.length);
-    this.resetInactivityTimer();
+    const receivedBytes = this.buffer.length;
+    this.state.progressReception(receivedBytes);
     console.log(
-      `[BLE] CHUNK accepted (${this.buffer.length}/${this.expectedLength} bytes)`
+      `[BLE] CHUNK received (offset=${receivedBytes - chunk.length}, chunk=${chunk.length}, total=${receivedBytes}/${this.expectedLength})`
     );
+    this.resetInactivityTimer();
     return 'chunk';
   }
 
@@ -150,7 +158,7 @@ class GridUploadCharacteristic extends Characteristic {
         `END received but payload size mismatch (${this.buffer.length}/${this.expectedLength})`
       );
     }
-    console.log('[BLE] END received, finalising payload');
+    console.log(`[BLE] END received (bytes=${this.buffer.length})`);
     this.clearInactivityTimer();
     return Buffer.from(this.buffer);
   }
@@ -204,3 +212,5 @@ class GridUploadCharacteristic extends Characteristic {
 }
 
 module.exports = GridUploadCharacteristic;
+
+

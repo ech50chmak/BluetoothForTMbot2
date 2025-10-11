@@ -1,4 +1,4 @@
-﻿# TM Grid Gateway
+# TM Grid Gateway
 
 Node.js BLE gateway for Raspberry Pi 4 inspired by `balena-web-ble`. The gateway exposes a Web Bluetooth friendly GATT service (`TMGridService`) that accepts tile-grid JSON payloads from a browser, saves them safely on the Pi, optionally triggers an external command, and streams status/telemetry to subscribers.
 
@@ -7,7 +7,7 @@ Node.js BLE gateway for Raspberry Pi 4 inspired by `balena-web-ble`. The gateway
 - `TMGridService` (UUID `12345678-1234-5678-1234-56789abc0000`) publishes:
   - `GridUploadCharacteristic` (`write`, UUID `...0001`) with write-with-response, START/CHUNK/END framing, inactivity timeout, and verbose logging.
   - `GridStatusCharacteristic` (`read`, `notify`, UUID `...0002`) that streams status snapshots using framed 20-byte notifications (START/CONT/END) so browsers with small MTU stay happy.
-- START/CHUNK/END protocol with MAX_CHUNK = 180 bytes and optional inline mode for very small payloads.
+- START/CHUNK/END protocol with MAX_CHUNK = 20 bytes and optional inline mode for very small payloads.
 - Atomic file writes to `GRID_PAYLOAD_PATH` via temporary files to prevent partial reads.
 - Optional `GRID_COMMAND` + `GRID_COMMAND_ARGS` execution after a successful upload, with exit-code tracking in status.
 - Centralised `GridState` (ES6 class) that validates payloads, enforces size limits, stores snapshots, logs every transition, and broadcasts updates.
@@ -57,6 +57,10 @@ Environment variables:
 | `GRID_MAX_BYTES`     | Maximum accepted payload size (bytes)                     | `1048576` (1 MiB)            |
 | `GRID_COMMAND`       | Optional command executed after a successful upload       | -                            |
 | `GRID_COMMAND_ARGS`  | Command arguments (JSON array or whitespace/comma list)   | -                            |
+| `GRID_TRANSFER_TIMEOUT_MS` | Transfer inactivity timeout before reset (ms)         | `30000`                      |
+| `GRID_CHUNK_MAX`   | Maximum accepted chunk payload size (bytes)            | `20`                         |
+
+Chunked transfers default to 20-byte payload slices (MTU ~ 23). Adjust `GRID_CHUNK_MAX` if your adapter negotiates a larger MTU, keeping client and server in sync.
 
 Example:
 
@@ -97,7 +101,8 @@ Serve `web/index.html` over HTTPS (or `http://localhost`) in Chrome/Edge/Brave w
 
 - **Connect** - pairs and subscribes to the status characteristic (log output + live JSON in the UI).
 - **Send (inline)** - writes a single frame using `writeValueWithResponse`. Recommended for payloads <= 100 bytes.
-- **Send (chunked)** - always uses START/CHUNK/END frames (MAX_CHUNK = 180 bytes) with exponential retry on transient errors.
+- **Send (chunked)** - always uses START/CHUNK/END frames (MAX_CHUNK = 20 bytes) with exponential retry on transient errors.
+- During transfers status notifications are paused and resumed to avoid parallel GATT operations.
 - Status updates arrive as START/CONT/END frames and are reassembled in the browser before parsing, following the same pattern as Nordic UART / Web Bluetooth console samples.
 
 The underlying helper is exposed via `setupClient` in `web/grid-client.js`. In DevTools you can call:
@@ -140,10 +145,3 @@ Press `Ctrl+C` (SIGINT) to stop advertising and disconnect clients cleanly.
 ## License
 
 Apache-2.0 - compatible with the upstream `balena-web-ble` example.
-
-
-
-
-
-
-
