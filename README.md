@@ -162,6 +162,7 @@ Press `Ctrl+C` (SIGINT) to stop advertising and disconnect clients cleanly.
 
 Apache-2.0 - compatible with the upstream `balena-web-ble` example.
 
+```
 # 0) Остановить всё, что могло держать репозиторий
 sudo systemctl stop tmbot-grid.service 2>/dev/null || true
 pkill -f "node.*BluetoothForTMbot2" 2>/dev/null || true
@@ -187,4 +188,4 @@ export BLENO_HCI_DEVICE_ID=0
 export BLE_DEVICE_NAME="TMbot"
 export GRID_PAYLOAD_PATH="/var/tmp/tmbot-grid.json"
 npm start
-
+```
