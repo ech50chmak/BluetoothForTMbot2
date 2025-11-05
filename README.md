@@ -161,3 +161,30 @@ Press `Ctrl+C` (SIGINT) to stop advertising and disconnect clients cleanly.
 ## License
 
 Apache-2.0 - compatible with the upstream `balena-web-ble` example.
+
+# 0) Остановить всё, что могло держать репозиторий
+sudo systemctl stop tmbot-grid.service 2>/dev/null || true
+pkill -f "node.*BluetoothForTMbot2" 2>/dev/null || true
+
+# 1) Перейти в каталог, где лежит репо (обычно $HOME)
+cd ~/
+
+# 2) Удалить старую копию целиком
+rm -rf BluetoothForTMbot2
+
+# 3) Клонировать свежую версию
+git clone --depth=1 https://github.com/ech50chmak/BluetoothForTMbot2.git
+cd BluetoothForTMbot2
+
+# 4) Установить зависимости
+npm ci || npm install
+
+# 5) Дать Node доступ к HCI (если не делали после обновлений Node)
+sudo setcap cap_net_raw+eip "$(readlink -f "$(which node)")"
+
+# 6) Запустить вручную для проверки
+export BLENO_HCI_DEVICE_ID=0
+export BLE_DEVICE_NAME="TMbot"
+export GRID_PAYLOAD_PATH="/var/tmp/tmbot-grid.json"
+npm start
+
